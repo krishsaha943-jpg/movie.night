@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Movie Night</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#111218;color:#eee;font:16px system-ui,sans-serif;padding:16px}
+main{max-width:1200px;margin:auto}
+button,input{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid #444;background:#1d1f29;color:#eee}
+button{cursor:pointer;background:#5b5bd6;border:0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
+.layout{display:grid;grid-template-columns:1fr 300px;gap:12px}
+@media(max-width:800px){.layout{grid-template-columns:1fr}}
+video{width:100%;aspect-ratio:16/9;background:#000;border-radius:10px}
+aside{display:flex;flex-direction:column;height:60vh;background:#1a1c25;border-radius:10px;padding:10px}
+#log{flex:1;overflow-y:auto;overflow-wrap:anywhere}
+#chatForm{display:flex;gap:6px}
+#msg{flex:1;min-width:0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>🍿 Movie Night</h1>
+<div id="lobby" class="row">
+  <input id="name" placeholder="Your name" maxlength="20">
+  <button id="start" disabled>Loading…</button>
+</div>
+<p id="status" role="status"></p>
+<section id="room" hidden>
+  <div id="hostBar" class="row" hidden>
+    <button id="invite">Copy invite link</button>
+    <label>Play a video file: <input type="file" id="file" accept="video/*"></label>
+    <button id="share">Share a tab/screen</button>
+  </div>
+  <div class="layout">
+    <div>
+      <video id="video" playsinline></video>
+      <div id="viewBar" class="row" hidden>
+        <button id="play">▶ Tap to play</button>
+        <button id="full">Full screen</button>
+        <label>Volume <input type="range" id="vol" min="0" max="1" step="0.05" value="1"></label>
+      </div>
+    </div>
+    <aside>
+      <div id="log"></div>
+      <form id="chatForm"><input id="msg" placeholder="Say something" maxlength="300" autocomplete="off"><button>Send</button></form>
+    </aside>
+  </div>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const roomId = new URLSearchParams(location.search).get('room');
+const isHost = !roomId;
+const MAX_FRIENDS = 6;
+const friends = new Map();   // host only: id -> {conn, name, call}
+let peer, hostConn, stream = null, myName = '';
+const video = $('video');
+
+const status = t => $('status').textContent = t;
+function addLine(text){
+  const p = document.createElement('p');
+  p.textContent = text;
+  $('log').append(p);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function broadcast(text){
+  addLine(text);
+  friends.forEach(f => f.conn.send({type:'chat', text}));
+}
+
+if (window.Peer) {
+  $('start').disabled = false;
+  $('start').textContent = isHost ? 'Create room (host)' : 'Join movie';
+} else status('Could not load the connection library. Check your internet or ad blocker, then reload.');
+
+$('start').onclick = () => {
+  myName = $('name').value.trim() || (isHost ? 'Host' : 'Friend');
+  $('start').disabled = true;
+  status('Connecting…');
+  peer = new Peer();
+  peer.on('error', e => {
+    status('Connection problem: ' + e.type + '. Reload and try again. If you are a friend, make sure the host tab is open and the link is new.');
+    $('start').disabled = false;
+  });
+  peer.on('disconnected', () => { if (!peer.destroyed) peer.reconnect(); });
+  peer.once('open', isHost ? startHost : startViewer);
+};
+
+function showRoom(){ $('lobby').hidden = true; $('room').hidden = false; }
+
+/* ---------- Host ---------- */
+function startHost(){
+  showRoom();
+  $('hostBar').hidden = false;
+  video.controls = true;
+  status('Room ready. Send the invite link, then choose a movie. Keep this tab open.');
+  peer.on('connection', conn => {
+    conn.on('open', () => {
+      if (friends.size >= MAX_FRIENDS) {
+        conn.send({type:'chat', text:'Sorry, the room is full.'});
+        return setTimeout(() => conn.close(), 500);
+      }
+      const f = {conn, name: String(conn.metadata?.name || 'Friend').slice(0,20), call:null};
+      friends.set(conn.peer, f);
+      broadcast(f.name + ' joined');
+      callFriend(conn.peer);
+    });
+    conn.on('data', d => {
+      const f = friends.get(conn.peer);
+      if (f && d?.type === 'chat') broadcast(f.name + ': ' + String(d.text).slice(0,300));
+    });
+    conn.on('close', () => {
+      const f = friends.get(conn.peer);
+      if (!f) return;
+      f.call?.close();
+      friends.delete(conn.peer);
+      broadcast(f.name + ' left');
+    });
+  });
+}
+
+function callFriend(id){
+  const f = friends.get(id);
+  if (!f || !stream) return;
+  f.call?.close();
+  f.call = peer.call(id, stream);
+  // Limit quality per friend so the host's upload speed can cope
+  const sender = f.call.peerConnection?.getSenders().find(s => s.track?.kind === 'video');
+  if (sender) setTimeout(() => {
+    const p = sender.getParameters();
+    if (!p.encodings?.length) return;
+    p.encodings[0].maxBitrate = 2500000;
+    sender.setParameters(p).catch(() => {});
+  }, 2000);
+}
+
+function useStream(s){
+  stream = s;
+  friends.forEach((_, id) => callFriend(id));
+}
+
+let needCapture = false;
+$('file').onchange = e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!video.captureStream) return status('File streaming needs Chrome or Edge on a computer.');
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  video.muted = false;
+  needCapture = true;
+  video.src = URL.createObjectURL(file);
+  status('Press play when everyone has joined.');
+};
+video.addEventListener('playing', () => {
+  if (isHost && needCapture) {
+    needCapture = false;
+    useStream(video.captureStream());
+    status('Streaming your movie.');
+  }
+});
+video.addEventListener('ended', () => { if (isHost) needCapture = true; });
+video.addEventListener('error', () => {
+  if (isHost) status('This video format will not play in the browser. Use an MP4 (H.264 video, AAC audio).');
+});
+
+$('share').onclick = async () => {
+  if (!navigator.mediaDevices?.getDisplayMedia) return status('Screen sharing needs a computer browser.');
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({
+      video:{frameRate:30},
+      audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}
+    });
+    needCapture = false;
+    video.pause();
+    video.removeAttribute('src');
+    video.srcObject = s;
+    video.muted = true; // avoids hearing the sound twice
+    video.play();
+    useStream(s);
+    status(s.getAudioTracks().length ? 'Sharing with sound.' : 'Sharing WITHOUT sound. Share again, pick a Chrome tab and turn on "Share tab audio".');
+    s.getVideoTracks()[0].onended = () => { stream = null; status('Sharing stopped.'); };
+  } catch { status('Screen sharing was cancelled or blocked.'); }
+};
+
+$('invite').onclick = async () => {
+  const link = location.origin + location.pathname + '?room=' + peer.id;
+  try { await navigator.clipboard.writeText(link); status('Invite link copied.'); }
+  catch { prompt('Copy this link:', link); }
+};
+
+/* ---------- Friend ---------- */
+function startViewer(){
+  hostConn = peer.connect(roomId, {metadata:{name:myName}, reliable:true});
+  hostConn.on('open', () => {
+    showRoom();
+    $('viewBar').hidden = false;
+    status('Connected. Waiting for the host to start the movie.');
+  });
+  hostConn.on('data', d => { if (d?.type === 'chat') addLine(d.text); });
+  hostConn.on('close', () => status('Disconnected from the host. Reload to rejoin.'));
+  peer.on('call', call => {
+    if (call.peer !== roomId) return call.close();
+    call.answer();
+    call.on('stream', s => {
+      if (video.srcObject !== s) video.srcObject = s;
+      video.play().then(() => status('Enjoy the movie!'))
+        .catch(() => status('Press "Tap to play" to start.'));
+    });
+  });
+}
+$('play').onclick = () => video.play().catch(() => status('The movie has not started yet.'));
+$('vol').oninput = e => video.volume = e.target.value;
+$('full').onclick = () => {
+  if (video.requestFullscreen) video.requestFullscreen();
+  else video.webkitEnterFullscreen?.();
+};
+
+$('chatForm').onsubmit = e => {
+  e.preventDefault();
+  const text = $('msg').value.trim();
+  if (!text) return;
+  if (isHost) broadcast(myName + ': ' + text);
+  else if (hostConn?.open) hostConn.send({type:'chat', text});
+  $('msg').value = '';
+};
+</script>
+</body>
+</html>
