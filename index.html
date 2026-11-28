@@ -18,6 +18,8 @@ aside{display:flex;flex-direction:column;height:60vh;background:#1a1c25;border-r
 #log{flex:1;overflow-y:auto;overflow-wrap:anywhere}
 #chatForm{display:flex;gap:6px}
 #msg{flex:1;min-width:0}
+video:fullscreen{width:100%;height:100%;aspect-ratio:auto;border-radius:0;object-fit:contain}
+video.fill:fullscreen{object-fit:cover}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -41,6 +43,7 @@ aside{display:flex;flex-direction:column;height:60vh;background:#1a1c25;border-r
       <div id="viewBar" class="row" hidden>
         <button id="play">▶ Tap to play</button>
         <button id="full">Full screen</button>
+        <label><input type="checkbox" id="fill"> Fill screen (crops edges)</label>
         <label>Volume <input type="range" id="vol" min="0" max="1" step="0.05" value="1"></label>
       </div>
     </div>
@@ -215,11 +218,17 @@ function startViewer(){
 }
 $('play').onclick = () => video.play().catch(() => status('The movie has not started yet.'));
 $('vol').oninput = e => video.volume = e.target.value;
-$('full').onclick = () => {
-  if (video.requestFullscreen) video.requestFullscreen();
-  else video.webkitEnterFullscreen?.();
+$('fill').onchange = e => video.classList.toggle('fill', e.target.checked);
+$('full').onclick = async () => {
+  if (!video.requestFullscreen) return video.webkitEnterFullscreen?.();
+  try {
+    await video.requestFullscreen();
+    await screen.orientation?.lock?.('landscape');
+  } catch {} // some phones do not allow locking the rotation
 };
-
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) try { screen.orientation?.unlock?.(); } catch {}
+});
 $('chatForm').onsubmit = e => {
   e.preventDefault();
   const text = $('msg').value.trim();
